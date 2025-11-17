@@ -1,0 +1,186 @@
+% This program implements the Cosserat Rod Theory
+% with simple Control inputs
+% 
+
+clear all;
+clc;
+
+%Hat operator
+hat = @(y)[0,-y(3),y(2);
+           y(3),0,-y(1);
+          -y(2),y(1),0];
+
+%Declare variables
+L = 1;                         %Length in m
+N = 50;                        %Spatial resolution
+E = 207e9;                     %Young's modulus
+r = 0.001;                     %Cross-section radius
+rt = {[0.01;0;0]               %Location of Tendons - We'll see if 4 works
+      [0;0.01;0]
+      [-0.01;0;0]
+      [0;-0.01;0]};             
+rho = 8000;                    %Density
+g = [-9.81;0;0];               %Gravity vector
+Bse = zeros(3);                %Shear/Bending Coefficient
+Bbt = 1e-6*eye(3);             %Bending/Torsion Coefficient
+C = 0.03*eye(3);               %Viscous Damping Coefficient
+dt = 0.015;                    %Size of Time step
+alpha = -0.2;                  %BDF-alpha parameter
+STEPS = 300;                   %Number of timesteps to completion
+
+%Initial Pre-bending variables
+vstar = @(s)[0;0;1];           
+ustar = @(s)[0;0;0];           
+vsstar = @(s)[0;0;1];
+usstar = @(s)[0;0;0];
+
+%Boundary Conditions
+%Clamped base to free end
+for i = 1 : STEPS
+    p{i,1} = [0;0;0];          
+    R{i,1} = eye(3);
+    q{i,1} = [0;0;0];
+    w{i,1} = [0;0;0];
+end
+
+nL = 0.0*g;                    %Start with a weight hung at the tip
+mL = [0;0;0];
+
+%Dependent Parameter Calculations
+A = pi*r^2;                                 %Cross-sectional area
+J = diag([pi*r^4/4  pi*r^4/4  pi*r^4/2]);   %Inertia Matrix
+G = E / (2 * (1 + 0.3));                    %Shear modulus
+Kse = diag([G*A, G*A, E*A]);                %SE Stiffness Matrix
+Kbt = diag([E*J(1,1), E*J(2,2), G*J(3,3)]); %BT Stiffness Matrix
+ds = L/(N-1);                               %Finite change in S over total steps
+
+%BDF-alpha coefficients
+C0 = (1.5 + alpha) / ( dt*(1+alpha) );      
+C1 = -2/dt;
+C2 = (0.5 + alpha) / ( dt*(1+alpha) );
+d1 = alpha / (1+alpha);
+
+% -- START SIMULATION -- 
+% Steps to consider:
+% 1) Solve with initial static conditions
+% 2) Apply Tension Forces
+% 3) Semi-discretize the PDE into an ODE using BDF-Alpha
+% 4) Solve PDE with shooting
+% 5) Model resulting rod using CRVisToolkit 
+
+
+% -- FUNCTIONS --
+function initialSolve()
+end
+
+%This function will essentially build the ODE that will be put through
+%fsolve
+function formCosseratODE(p, R, n, m, q, w)
+    v = (Kse + C0*Bse)\(R'*n + Kse*vstar(ds*(j-1)) - Bse*vh{i,j}); %Use \ for inverse for better stability
+    u = (Kbt + C0*Bbt)\(R'*m + Kbt*ustar(ds*(j-1)) - Bbt*uh{i,j});
+    
+    %Time derivatives - Replaced by BDFa terms
+    vt = C0*v + vh{i,j};
+    ut = C0*u + uh{i,j};
+    qt = C0*q + qh{i,j};
+    wt = C0*w + wh{i,j};
+
+    %Calculate Forces
+    %Using _ for subscript t, for tension forces
+    [a_t, b_t, A_t, B_t, G_t, H_t] = getTendonForces();
+
+    f = rho*a*g + R*(a_t + A_t*vs + G_t*us) - (R*C*q.*abs(q));
+    l = R*(b_t + B_t*vt + H_t*ut);
+
+    %Following Sharifi et al for vs and us
+    %Their code seems to assume that all block matrices are diagonal
+    %The following works in all cases, but is a bit less efficient
+    %I didn't time to verify the matrix sizes to know if Gt is diagonal
+    phi = [Kse + C0*Bse + A, G;
+           G', Kbt + C0*Bbt + H];
+
+    LamdaN = hat(u) * (Kse * (v - vstar(ds*(j-1)) + Bse*vt)) - Kse*vsstar(ds*(j-1)) + Bse*vsh{i,j};
+    LamdaM = hat(u) * (Kbt * (u - ustar(ds*(j-1)) + Bbt*ut)) - Kbt*usstar(ds*(j-1)) + Bbt*ush{i,j};
+    GammaN = R'*rho*A*R*(hat(w)*q + qt) + C*q.*abs(q) - R'*rho*A_t*g - a_t;
+    GammaM = 
+
+    rhs = [-GammaN + LamdaN;
+           -GammaM + LamdaM];
+    x = phi \ rhs;
+
+    %Extract the result into vs and us
+    vs = x(1:size(Kse,1)); %Block size is determined by Kse
+    us = x(size(Kse,1)+1:end);
+
+
+    %Spatial derivatives
+    ps = R * v;
+    Rs = R * hat(u);
+    qs = vt - hat(u)*q + hat(w)*v;
+    ws = ut - hat(u)*w;
+    ns = rho*A*R*(hat(w)*q + qt) - f;
+    ms = R*rho*(hat(w)*J*w + J*wt) - hat(ps)*n - l;
+end
+
+%This function calculates the variables required to find the tendon forces
+%Honestly, I could make this modular to have n tendons
+%Probably a future thing
+function [a, b, At, Bt, Gt, Ht] = getTendonForces()
+
+    %Tendon 1
+    ptsb1 = hat(u)*rt{1}+v;
+    At1 = -Tt{1} * (hat(ptsb1) * hat(ptsb1)) / (norm(ptsb1)^3);
+    Gt1 = At1*hat(rt{1});
+    Bt1 = hat(rt{1}) * At1;
+    H1 = Bt1 * hat(rt{1});
+    a1 = At1 * (hat(u) * ptsb1); %Assume the derivatives of r to be 0
+    b1 = hat(rt{1}) * a1;
+
+    %Tendon 2
+    ptsb2 = hat(u)*rt{2}+v;
+    At2 = -Tt{2} * (hat(ptsb2) * hat(ptsb2)) / (norm(ptsb2)^3);
+    Gt2 = At2*hat(rt{2});
+    Bt2 = hat(rt{2}) * At2;
+    H2 = Bt2 * hat(rt{2});
+    a2 = At2 * (hat(u) * ptsb2); 
+    b2 = hat(rt{2}) * a2;
+
+    %Tendon 3
+    ptsb3 = hat(u)*rt{3}+v;
+    At3 = -Tt{3} * (hat(ptsb3) * hat(ptsb3)) / (norm(ptsb3)^3);
+    Gt3 = At3*hat(rt{3});
+    Bt3 = hat(rt{3}) * At3;
+    H3 = Bt3 * hat(rt{3});
+    a3 = At3 * (hat(u) * ptsb3); 
+    b3 = hat(rt{3}) * a3;
+
+    %Tendon 4
+    ptsb4 = hat(u)*rt{4}+v;
+    At4 = -Tt{4} * (hat(ptsb4) * hat(ptsb4)) / (norm(ptsb4)^3);
+    Gt4 = At4*hat(rt{4});
+    Bt4 = hat(rt{4}) * At4;
+    H4 = Bt4 * hat(rt{4});
+    a4 = At4 * (hat(u) * ptsb4); 
+    b4 = hat(rt{4}) * a4;
+
+    %Sum the values
+    a = a1 + a2 + a3 +a4;
+    b = b1 + b2 + b3 +b4;
+    At = At1 + At2 + At3 + At4;
+    Bt = Bt1 + Bt2 + Bt3 + Bt4;
+    Gt = Gt1 + Gt2 + Gt3 + Gt4;
+    Ht = H1 + H2 + H3 + H4;
+end
+
+
+function updateDBFAlpha()
+%h for history, these are history term updates
+   for j = 1 : N-1        
+       vh{i+1,j} = c1*v{i,j} + c2*v{i-1,j} + d1*vt{i,j};
+       uh{i+1,j} = c1*u{i,j} + c2*u{i-1,j} + d1*ut{i,j};
+       vsh{i+1,j} = c1*vs{i,j} + c2*vs{i-1,j} + d1*vst{i,j};
+       ush{i+1,j} = c1*us{i,j} + c2*us{i-1,j} + d1*ust{i,j};
+       qh{i+1,j} = c1*q{i,j} + c2*q{i-1,j} + d1*qt{i,j};
+       wh{i+1,j} = c1*w{i,j} + c2*w{i-1,j} + d1*wt{i,j};
+   end
+end
