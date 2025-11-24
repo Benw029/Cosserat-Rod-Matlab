@@ -1,11 +1,14 @@
-% This program implements the Cosserat Rod Theory
-% with simple Control inputs
-% 
+% This program implements the Cosserat Rod Theory for a Tendon Driven CR
+% with simple Control inputs using Sliding Model Control and Lyapunov
+% Stability
+% Benjamin Chung
+% 11/24/2025
+
 function CosseratRod
 clear all;
 clc;
 
-global i p R j n m v u q w vs us vt ut qt wt vst ust vh uh vsh ush qh wh nLL mLL x y z X Y Z  %Make vars available in whole program
+global i p R j n m v u q w ns vs us vt ut qt wt vst ust vh uh vsh ush qh wh nLL mLL x y z X Y Z  %Make vars available in whole program
 %Hat operator
 hat = @(y)[0, -y(3), y(2);
            y(3), 0, -y(1);
@@ -13,22 +16,22 @@ hat = @(y)[0, -y(3), y(2);
 
 %Declare variables
 L = 0.5;                       %Length in m
-N = 50;                        %Spatial resolution
-E = 207e9;                     %Young's modulus
+N = 30;                        %Spatial resolution
+E = 190e9;                     %Young's modulus
 r = 0.001;                     %Cross-section radius
 rt = {[0.01;0;0]               %Location of Tendons - We'll see if 4 works
       [0;0.01;0]
       [-0.01;0;0]
       [0;-0.01;0]};             
-rho = 8000;                    %Density
+rho = 6366;                    %Density
 g = [0;0;-9.81];               %Gravity vector
 Bse = zeros(3);                %Shear/Bending Coefficient
-Bbt = 1e-6*eye(3);             %Bending/Torsion Coefficient
-C = 0.03*eye(3);               %Viscous Damping Coefficient
-Tt = {0 0 0 0};
+Bbt = 0.08*eye(3);             %Bending/Torsion Coefficient
+C = 0.1*eye(3);                %Viscous Damping Coefficient
+Tt = {0 0 0 0};                %Assume 0 Tension during initial Static solve
 dt = 0.015;                    %Size of Time step
 alpha = -0.2;                  %BDF-alpha parameter
-STEPS = 300;                   %Number of timesteps to completion
+STEPS = 200;                    %Number of timesteps to completion
 
 %Initial Pre-bending variables
 vstar = @(s)[0;0;1];           
@@ -45,7 +48,7 @@ for i = 1 : STEPS
     w{i,1} = [0;0;0];
 end
 
-nL = 0.0*g;                    %Start with a weight hung at the tip
+nL = [0;0;0];                    %Start with no forces
 mL = [0;0;0];
 
 %Dependent Parameter Calculations
@@ -89,12 +92,20 @@ for j = 1 : N-1
 end
 
 %Set Control Variables
-Pd = [0.5; 0; 0];
-Vtd = [0.1; 0.1; 0.1];
-control_c = 1;
-k = 0.3;
-epsilon = 0.001;
-Accd = [0.1; 0.1; 0.1];
+CONTROL = true;
+P_d = [0.02; 0; 0.500];     %Desired end point
+V_d = [0; 0; 0];            %Desired tip velocity
+Acc_d = [0; 0; 0];          %Desired tip acceleration
+Control_c = 200;            %Control gain 1
+k = 100;                    %Control gain 2 (for S convergence)
+epsilon = 0.005;            %Reaching epsilon
+clamp = 87;
+threshold = 0.001;
+
+%DEBUG
+warning('off', 'all');
+options = optimoptions('fsolve', 'Display', 'none');
+goalReached = false;
 
 
 % -- START SIMULATION LOOP --
@@ -108,20 +119,26 @@ for i = 2 : STEPS
         Tt{3} = 0;
         Tt{4} = 0;
     else
-        Tt = SMCCosserat(p{i-1,N}, Pd, v{i-1, N-1}, Vtd, u{i-1,N-1}, control_c, k, epsilon, R{i-1, N}, q{i-1, N}, Accd);
-        %{
-        Tt{1} = 3; %INPUT TENDON FORCES
-        Tt{2} = 1;
-        Tt{3} = 1.5;
-        Tt{4} = 0.5;
-        %}
+        if CONTROL
+            %disp(["Control Vars",)
+            Tt = SMCCosserat(P_d, V_d, Control_c, k, epsilon, Acc_d);
+        else
+            Tt{1} = 100; %INPUT TENDON FORCES
+            Tt{2} = 0;
+            Tt{3} = 0;
+            Tt{4} = 0;
+        end
     end 
 
     %Now to actually solve, given the tendon forces
-    disp("Solving Dynamic Model")
-    fsolve(@dynamicSolve, [n{i-1,1}; m{i-1,1}]); %Solve semi-discretized PDE w/ shooting
+    disp(["Solving Dynamic Model, Step = ", i])
+    fsolve(@dynamicSolve, [n{i-1,1}; m{i-1,1}], options); %Solve semi-discretized PDE w/ shooting
     updateBDFalpha();
     visualize();
+
+    if(goalReached)
+        break
+    end
 end
 
 %Possibly insert result into CRVis
@@ -164,6 +181,7 @@ function E = dynamicSolve(G)
 
     E = [n{i,N} - nLL ;  m{i,N} - mLL];
 end
+disp('Final Pos'); p{i,j}
 
 %This function will essentially build the ODE that will be put through
 %fsolve dynamically over time
@@ -336,39 +354,54 @@ function updateBDFalpha()
    end
 end
 
-function Tt = SMCCosserat(P, Pd, Vt, Vtd, u, C, k, epsilon, R, q, Accd)
-    
-    e = Pd - P; %Error between positions
-    edot = Vtd - Vt; %Derivative of error, which is velocity
-    S = edot + C*e; %Sliding surface
+function Tt = SMCCosserat(X1d, Xdot1d, Control_c, k, epsilon, Xddotd)
+
+    X1 = p{i-1,N-1};
+    Xdot1 = R{i-1,N-1}*q{i-1,N-1};
+    e = X1d - X1; %Error between positions
+    edot = Xdot1d - Xdot1; %Derivative of error, which is velocity
+    S = edot + Control_c*e; %Sliding surface
 
     %Calculating the Alphas
-    pts1 = hat(u)*rt{1}+Vt;
-    pts2 = hat(u)*rt{2}+Vt;
-    pts3 = hat(u)*rt{3}+Vt;
-    pts4 = hat(u)*rt{4}+Vt;
+    pts1 = R{i-1, N-1}*hat(u{i-1,N-1})*rt{1} + v{i-1,N-1};
+    %pts2 = R*hat(u)*rt{2} + V;
+    %pts3 = R*hat(u)*rt{3} + V;
+    %pts4 = R*hat(u)*rt{4} + V;
     
-    %{
-    ptss1 = hat(u)*pts1 + rt{1}+R*Vt;
-    ptss2 = hat(u)*rt{2}+R*Vt;
-    ptss3 = hat(u)*rt{3}+R*Vt;
-    ptss4 = hat(u)*rt{4}+R*Vt;
-    %}
-    ptss = [1;1;1];
+    ptss1 = R{i-1, N-1}*hat(u{i-1,N-1})*hat(u{i-1,N-1})*rt{1} + hat(u{i-1,N-1})*v{i-1,N-1} + hat(us{i-1, N-1})*rt{1} + vs{i-1,N-1};
+    %ptss2 = R*hat(u)*hat(u)*rt{2} + hat(u)*V + hat(us{i-1, N-1})*rt{2} + vs{i-1,N-1};
+    %ptss3 = R*hat(u)*hat(u)*rt{3} + hat(u)*V + hat(us{i-1, N-1})*rt{3} + vs{i-1,N-1};
+    %tss4 = R*hat(u)*hat(u)*rt{4} + hat(u)*V + hat(us{i-1, N-1})*rt{4} + vs{i-1,N-1};
     
-    a1 = ( (hat(pts1) * hat(pts1)) / (norm(pts1)^3) ) * ptss;
-    a2 = ( (hat(pts2) * hat(pts2)) / (norm(pts2)^3) ) * ptss;
-    a3 = ( (hat(pts3) * hat(pts3)) / (norm(pts3)^3) ) * ptss;
-    a4 = ( (hat(pts4) * hat(pts4)) / (norm(pts4)^3) ) * ptss;
+    a1 = ( (hat(pts1)*hat(pts1)*ptss1) / (norm(pts1)^3) ) + (pts1 / norm(pts1));
+    %a2 = ( ( (hat(pts2)*hat(pts2)) / (norm(pts2)^3) ) * ptss2 ) + (pts2 / norm(pts2));
+    %a3 = ( ( (hat(pts3)*hat(pts3)) / (norm(pts3)^3) ) * ptss3 ) + (pts3 / norm(pts3));
+    %a4 = ( ( (hat(pts4)*hat(pts4)) / (norm(pts4)^3) ) * ptss4 ) + (pts4 / norm(pts4));
 
-    alpha = [-a1 -a2 -a3 -a4];
+    %alpha = [-a1 -a2 -a3 -a4];
+    alpha = -[a1 zeros(3,1) zeros(3,1) zeros(3,1)];
 
-    ac = (1/rho*A)*(nLL + 0);
-    bc = (-1/rho*A)*(alpha);
+    ac = (ns + rho*A*g - (R{i-1, N-1}*C*q{i-1, N-1}.*abs(q{i-1, N-1}))) / (rho*A);
+    bc = (alpha) / (-rho*A);
 
-    Tt = bc\(C * (Vtd - Vt) + Accd - ac + epsilon*sign(S) + k*S);
-    Tt = num2cell(Tt)
+    Tt = bc\((Control_c*edot) + Xddotd - ac + epsilon*sign(S) + k*S);
+    Tt = num2cell(Tt);
 
+    %Apply clamping saturation
+    for l = 1:4
+        if(Tt{l} > clamp)
+            Tt{l} = clamp;
+        end
+        if(Tt{l} < 0)
+            Tt{l} = 0;
+        end
+    end
+
+    e
+    if(e(1) < threshold && e(1) > 0)
+        goalReached = true;
+        return
+    end
 end
 
 
@@ -378,8 +411,6 @@ function visualize()
     % L: rod length for axis limits
     % i: current time step
 
-    % Only update every 10 frames
-    if rem(i,10) == 0
         % Extract x,y,z positions
         x = zeros(1,N);
         y = zeros(1,N);
@@ -394,20 +425,16 @@ function visualize()
         persistent hLine
         if isempty(hLine) || ~isvalid(hLine)
             figure(1); clf;
-            hLine = plot3(z, y, x, '-o', 'LineWidth', 2, 'MarkerSize', 4);
-            axis([-0.05*L 1.1*L  -0.1*L 0.1*L -0.05*L 0.1*L]);
-            xlabel('z (m)'); ylabel('y (m)'); zlabel('x (m)');
+            hLine = plot3(x, y, z, '-o', 'LineWidth', 2, 'MarkerSize', 4);
+            axis([-0.1*L, 0.1*L, -0.1*L, 0.1*L, -0.05*L, 1.1*L]);
+            xlabel('x (m)'); ylabel('y (m)'); zlabel('z (m)');
             grid on; view(3);
         else
             % Update existing line
-            set(hLine, 'XData', z, 'YData', y, 'ZData', x);
+            set(hLine, 'XData', x, 'YData', y, 'ZData', z);
         end
         drawnow;
         pause(0.05);
-    end
-
-
-
 end
 %{
     for i = 1 : STEPS, U(i)=i*dt; X(i)=p{i,N}(1); Y(i)=p{i,N}(2); Z(i)=p{i,N}(3); end
