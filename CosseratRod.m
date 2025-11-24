@@ -12,7 +12,7 @@ hat = @(y)[0, -y(3), y(2);
           -y(2), y(1), 0];
 
 %Declare variables
-L = 0.5;                         %Length in m
+L = 0.5;                       %Length in m
 N = 50;                        %Spatial resolution
 E = 207e9;                     %Young's modulus
 r = 0.001;                     %Cross-section radius
@@ -88,7 +88,14 @@ for j = 1 : N-1
     w{i,j} = [0;0;0];
 end
 
-%Visualize the static beam with CRVis
+%Set Control Variables
+Pd = [0.5; 0; 0];
+Vtd = [0.1; 0.1; 0.1];
+control_c = 1;
+k = 0.3;
+epsilon = 0.001;
+Accd = [0.1; 0.1; 0.1];
+
 
 % -- START SIMULATION LOOP --
 for i = 2 : STEPS
@@ -101,10 +108,13 @@ for i = 2 : STEPS
         Tt{3} = 0;
         Tt{4} = 0;
     else
+        Tt = SMCCosserat(p{i-1,N}, Pd, v{i-1, N-1}, Vtd, u{i-1,N-1}, control_c, k, epsilon, R{i-1, N}, q{i-1, N}, Accd);
+        %{
         Tt{1} = 3; %INPUT TENDON FORCES
         Tt{2} = 1;
         Tt{3} = 1.5;
         Tt{4} = 0.5;
+        %}
     end 
 
     %Now to actually solve, given the tendon forces
@@ -326,8 +336,43 @@ function updateBDFalpha()
    end
 end
 
-%TEMPORARY
-    function visualize()
+function Tt = SMCCosserat(P, Pd, Vt, Vtd, u, C, k, epsilon, R, q, Accd)
+    
+    e = Pd - P; %Error between positions
+    edot = Vtd - Vt; %Derivative of error, which is velocity
+    S = edot + C*e; %Sliding surface
+
+    %Calculating the Alphas
+    pts1 = hat(u)*rt{1}+Vt;
+    pts2 = hat(u)*rt{2}+Vt;
+    pts3 = hat(u)*rt{3}+Vt;
+    pts4 = hat(u)*rt{4}+Vt;
+    
+    %{
+    ptss1 = hat(u)*pts1 + rt{1}+R*Vt;
+    ptss2 = hat(u)*rt{2}+R*Vt;
+    ptss3 = hat(u)*rt{3}+R*Vt;
+    ptss4 = hat(u)*rt{4}+R*Vt;
+    %}
+    ptss = [1;1;1];
+    
+    a1 = ( (hat(pts1) * hat(pts1)) / (norm(pts1)^3) ) * ptss;
+    a2 = ( (hat(pts2) * hat(pts2)) / (norm(pts2)^3) ) * ptss;
+    a3 = ( (hat(pts3) * hat(pts3)) / (norm(pts3)^3) ) * ptss;
+    a4 = ( (hat(pts4) * hat(pts4)) / (norm(pts4)^3) ) * ptss;
+
+    alpha = [-a1 -a2 -a3 -a4];
+
+    ac = (1/rho*A)*(nLL + 0);
+    bc = (-1/rho*A)*(alpha);
+
+    Tt = bc\(C * (Vtd - Vt) + Accd - ac + epsilon*sign(S) + k*S);
+    Tt = num2cell(Tt)
+
+end
+
+
+function visualize()
     % p: cell array p{i,j} = 3x1 positions
     % N: number of points along rod
     % L: rod length for axis limits
@@ -360,6 +405,9 @@ end
         drawnow;
         pause(0.05);
     end
+
+
+
 end
 %{
     for i = 1 : STEPS, U(i)=i*dt; X(i)=p{i,N}(1); Y(i)=p{i,N}(2); Z(i)=p{i,N}(3); end
