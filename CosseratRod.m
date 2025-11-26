@@ -9,6 +9,7 @@ clear all;
 clc;
 
 global i p R j n m v u q w ns vs us vt ut qt wt vst ust vh uh vsh ush qh wh nLL mLL x y z X Y Z  %Make vars available in whole program
+global Tension_Hist X1_Hist Xdot1_Hist e_Hist edot_Hist
 %Hat operator
 hat = @(y)[0, -y(3), y(2);
            y(3), 0, -y(1);
@@ -16,22 +17,23 @@ hat = @(y)[0, -y(3), y(2);
 
 %Declare variables
 L = 0.5;                       %Length in m
-N = 30;                        %Spatial resolution
+N = 20;                        %Spatial resolution
 E = 190e9;                     %Young's modulus
-r = 0.001;                     %Cross-section radius
+r = 1/1000;                     %Cross-section radius
 rt = {[0.01;0;0]               %Location of Tendons - We'll see if 4 works
       [0;0.01;0]
       [-0.01;0;0]
       [0;-0.01;0]};             
-rho = 6366;                    %Density
+rho = 17189;                    %Density
 g = [0;0;-9.81];               %Gravity vector
 Bse = zeros(3);                %Shear/Bending Coefficient
-Bbt = 0.08*eye(3);             %Bending/Torsion Coefficient
-C = 0.1*eye(3);                %Viscous Damping Coefficient
+Bbt = 0.008*eye(3);              %Bending/Torsion Coefficient
+C = 0.01*eye(3);                %Viscous Damping Coefficient
 Tt = {0 0 0 0};                %Assume 0 Tension during initial Static solve
-dt = 0.015;                    %Size of Time step
+dt = 0.005;                    %Size of Time step
 alpha = -0.2;                  %BDF-alpha parameter
-STEPS = 200;                    %Number of timesteps to completion
+STEPS = 100;                    %Number of timesteps to completion
+STEPCOUNT = 1;
 
 %Initial Pre-bending variables
 vstar = @(s)[0;0;1];           
@@ -93,14 +95,13 @@ end
 
 %Set Control Variables
 CONTROL = true;
-P_d = [0.02; 0; 0.500];     %Desired end point
-V_d = [0; 0; 0];            %Desired tip velocity
-Acc_d = [0; 0; 0];          %Desired tip acceleration
-Control_c = 200;            %Control gain 1
-k = 100;                    %Control gain 2 (for S convergence)
-epsilon = 0.005;            %Reaching epsilon
-clamp = 87;
-threshold = 0.001;
+P_d = [0.025; 0.0000; 0.4727];     %Desired end point
+V_d = [0; 0; 0];                    %Desired tip velocity
+Acc_d = [0; 0; 0];                  %Desired tip acceleration
+Control_c = diag([15000, 1, 500]);   %Control gain 1
+k = diag([30, 1, 5]);                              %Control gain 2 (for S convergence)
+epsilon = 0.005;                    %Reaching epsilon
+clamp = 8;
 
 %DEBUG
 warning('off', 'all');
@@ -110,7 +111,7 @@ goalReached = false;
 
 % -- START SIMULATION LOOP --
 for i = 2 : STEPS
-
+    STEPCOUNT = STEPCOUNT + 1;
     %Set the Tendon Forces at each time step
     %Likely will have the control input function here, then set the forces
     if i < 5
@@ -121,9 +122,12 @@ for i = 2 : STEPS
     else
         if CONTROL
             %disp(["Control Vars",)
-            Tt = SMCCosserat(P_d, V_d, Control_c, k, epsilon, Acc_d);
+            Tt{1} = SMCCosserat(P_d, V_d, Control_c, k, epsilon, Acc_d);
+            Tt{2} = 0;
+            Tt{3} = 0;
+            Tt{4} = 0;
         else
-            Tt{1} = 100; %INPUT TENDON FORCES
+            Tt{1} = 3; %INPUT TENDON FORCES
             Tt{2} = 0;
             Tt{3} = 0;
             Tt{4} = 0;
@@ -135,13 +139,9 @@ for i = 2 : STEPS
     fsolve(@dynamicSolve, [n{i-1,1}; m{i-1,1}], options); %Solve semi-discretized PDE w/ shooting
     updateBDFalpha();
     visualize();
-
-    if(goalReached)
-        break
-    end
 end
 
-%Possibly insert result into CRVis
+disp('Final Pos'); p{i,N-1}
 
 % -- FUNCTIONS --
 function E = initialSolve(G)
@@ -181,7 +181,7 @@ function E = dynamicSolve(G)
 
     E = [n{i,N} - nLL ;  m{i,N} - mLL];
 end
-disp('Final Pos'); p{i,j}
+
 
 %This function will essentially build the ODE that will be put through
 %fsolve dynamically over time
@@ -206,10 +206,12 @@ function [ps,Rs,ns,ms,qs,ws,vs,us,v,u,vt,ut,qt,wt,vst,ust] = formCosseratODE(p, 
     phi = [Kse + C0*Bse + A_t, G_t;
            G_t', Kbt + C0*Bbt + H_t];
 
+    %{
     LamdaN = hat(u) * (Kse * (v - vstar(ds*(j-1)) + Bse*vt)) - Kse*vsstar(ds*(j-1)) + Bse*vsh{i,j};
     LamdaM = hat(u) * (Kbt * (u - ustar(ds*(j-1)) + Bbt*ut)) - Kbt*usstar(ds*(j-1)) + Bbt*ush{i,j};
     GammaN = rho*A*(hat(w)*q + qt) + C*q.*abs(q) - R'*rho*A_t*g - a_t; %**R'R = 1, so can be omitted
     GammaM = rho*(hat(w)*J*w + J*wt) - hat(v) * (Kse * (v - vstar(ds*(j-1)) + Bse*vt)) - b_t; %**hat(ps) = Rv, also le = 0
+
 
     rhs = [-GammaN + LamdaN;
            -GammaM + LamdaM];
@@ -218,6 +220,15 @@ function [ps,Rs,ns,ms,qs,ws,vs,us,v,u,vt,ut,qt,wt,vst,ust] = formCosseratODE(p, 
     %Extract the result into vs and us
     vs = temp(1:3); %Block size is determined by Kse
     us = temp(4:6);
+    %}
+
+    LamdaN = -a_t + rho*A*(hat(w)*q + qt)+ C*q.*abs(q)- R'*rho*A*g;
+    LamdaM = -b_t + rho*(hat(w)*J*w + J*wt) -hat (v)*(Kse*(v-vstar(ds*(j-1)))+Bse*vt);
+    GammaV = hat(u)*(Kse*(v-vstar(ds*(j-1)))+Bse*vt)-Kse*vsstar(ds*(j-1))+Bse*vsh{i,j};
+    GammaU = hat(u)*(Kbt*(u-ustar(ds*(j-1)))+Bbt*ut)-Kbt*usstar(ds*(j-1))+Bbt*ush{i,j};
+
+    us = 1/det(phi)*(-G_t'*(-GammaV+LamdaN)+(Kse+C0*Bse+A_t)*(-GammaU+LamdaM));
+    vs = 1/det(phi)*((Kbt+C0*Bbt+H_t)*(-GammaV+LamdaN)-G_t*(-GammaU+LamdaM));
 
     vst = C0*vs + vsh{i,j};
     ust = C0*us + ush{i,j};
@@ -358,50 +369,55 @@ function Tt = SMCCosserat(X1d, Xdot1d, Control_c, k, epsilon, Xddotd)
 
     X1 = p{i-1,N-1};
     Xdot1 = R{i-1,N-1}*q{i-1,N-1};
-    e = X1d - X1; %Error between positions
+    e = (X1d - X1); %Error between positions
     edot = Xdot1d - Xdot1; %Derivative of error, which is velocity
     S = edot + Control_c*e; %Sliding surface
 
     %Calculating the Alphas
     pts1 = R{i-1, N-1}*hat(u{i-1,N-1})*rt{1} + v{i-1,N-1};
-    %pts2 = R*hat(u)*rt{2} + V;
-    %pts3 = R*hat(u)*rt{3} + V;
-    %pts4 = R*hat(u)*rt{4} + V;
+    %pts2 = R{i-1, N-1}*hat(u{i-1,N-1})*rt{2} + v{i-1,N-1};
+    %pts3 = R{i-1, N-1}*hat(u{i-1,N-1})*rt{3} + v{i-1,N-1};
+    %pts4 = R{i-1, N-1}*hatbut i(u{i-1,N-1})*rt{3} + v{i-1,N-1};
     
     ptss1 = R{i-1, N-1}*hat(u{i-1,N-1})*hat(u{i-1,N-1})*rt{1} + hat(u{i-1,N-1})*v{i-1,N-1} + hat(us{i-1, N-1})*rt{1} + vs{i-1,N-1};
-    %ptss2 = R*hat(u)*hat(u)*rt{2} + hat(u)*V + hat(us{i-1, N-1})*rt{2} + vs{i-1,N-1};
-    %ptss3 = R*hat(u)*hat(u)*rt{3} + hat(u)*V + hat(us{i-1, N-1})*rt{3} + vs{i-1,N-1};
-    %tss4 = R*hat(u)*hat(u)*rt{4} + hat(u)*V + hat(us{i-1, N-1})*rt{4} + vs{i-1,N-1};
+    %ptss2 = R{i-1, N-1}*hat(u{i-1,N-1})*hat(u{i-1,N-1})*rt{2} + hat(u{i-1,N-1})*v{i-1,N-1} + hat(us{i-1, N-1})*rt{1} + vs{i-1,N-1};
+    %ptss3 = R{i-1, N-1}*hat(u{i-1,N-1})*hat(u{i-1,N-1})*rt{3} + hat(u{i-1,N-1})*v{i-1,N-1} + hat(us{i-1, N-1})*rt{1} + vs{i-1,N-1};
+    %tss4 = R{i-1, N-1}*hat(u{i-1,N-1})*hat(u{i-1,N-1})*rt{4} + hat(u{i-1,N-1})*v{i-1,N-1} + hat(us{i-1, N-1})*rt{1} + vs{i-1,N-1};
     
     a1 = ( (hat(pts1)*hat(pts1)*ptss1) / (norm(pts1)^3) ) + (pts1 / norm(pts1));
-    %a2 = ( ( (hat(pts2)*hat(pts2)) / (norm(pts2)^3) ) * ptss2 ) + (pts2 / norm(pts2));
-    %a3 = ( ( (hat(pts3)*hat(pts3)) / (norm(pts3)^3) ) * ptss3 ) + (pts3 / norm(pts3));
-    %a4 = ( ( (hat(pts4)*hat(pts4)) / (norm(pts4)^3) ) * ptss4 ) + (pts4 / norm(pts4));
+    %a2 = ( (hat(pts2)*hat(pts2)*ptss2) / (norm(pts2)^3) ) + (pts2 / norm(pts2));
+    %a3 = ( (hat(pts3)*hat(pts3)*ptss3) / (norm(pts3)^3) ) + (pts3 / norm(pts3));
+    %a4 = ( (hat(pts4)*hat(pts4)*ptss4) / (norm(pts4)^3) ) + (pts4 / norm(pts4));
 
     %alpha = [-a1 -a2 -a3 -a4];
-    alpha = -[a1 zeros(3,1) zeros(3,1) zeros(3,1)];
+    alpha = [a1];
 
     ac = (ns + rho*A*g - (R{i-1, N-1}*C*q{i-1, N-1}.*abs(q{i-1, N-1}))) / (rho*A);
     bc = (alpha) / (-rho*A);
 
-    Tt = bc\((Control_c*edot) + Xddotd - ac + epsilon*sign(S) + k*S);
-    Tt = num2cell(Tt);
-
+    Tt = bc\(Control_c*edot + Xddotd - ac + epsilon*sign(S) + k*(edot + Control_c*e));
+%     Tt = num2cell(Tt)
+    
     %Apply clamping saturation
-    for l = 1:4
-        if(Tt{l} > clamp)
-            Tt{l} = clamp;
+        if(Tt > clamp)
+            Tt = clamp;
         end
-        if(Tt{l} < 0)
-            Tt{l} = 0;
-        end
-    end
 
-    e
-    if(e(1) < threshold && e(1) > 0)
-        goalReached = true;
-        return
-    end
+%     for l = 1:4
+%         if(Tt{l} > clamp)
+%             Tt{l} = clamp;
+%         end
+%         if(Tt{l} < 0)
+%             Tt{l} = 0; 
+%         end
+%     end
+
+%     Tension_Hist(i) = Tt{1};
+    Tension_Hist(i) = Tt;
+    X1_Hist(i) = X1(1);
+    Xdot1_Hist(i) = Xdot1(1);
+    e_Hist(i) = e(1);
+    edot_Hist(i) = edot(1);
 end
 
 
@@ -436,17 +452,31 @@ function visualize()
         drawnow;
         pause(0.05);
 end
-%{
-    for i = 1 : STEPS, U(i)=i*dt; X(i)=p{i,N}(1); Y(i)=p{i,N}(2); Z(i)=p{i,N}(3); end
-    figure (1)    
+
+    for time = 1:STEPCOUNT
+            x(time) = p{time,N}(1);
+            z(time) = p{time,N}(3);
+    end
+
+    y_axis = 1:size(x,2);
+    figure (2)    
     subplot(2,1,1)
-    plot(U,X);
-    xlabel('t (s)');  ylabel('x (m)'); title('Tip Displacement - X Component');
+    plot(y_axis,x, '-o');
+    xlabel('Step');  ylabel('x (m)'); title('Tip Displacement - X Component');
+
+    if(CONTROL)
     subplot(2,1,2)
-    plot(U,Y);
-    xlabel('t (s)');  ylabel('y (m)'); title('Tip Displacement - Y Component');
-%}
-%VisualizeRod(R);
+    plot(y_axis, Tension_Hist, '-o');
+    xlabel('t (s)');  ylabel('F (N)'); title('Tendon Tension');
+
+    figure(3)
+    plot(X1_Hist, Xdot1_Hist);
+    xlabel('X1'); ylabel('Xdot1');
+
+    figure(4)
+    plot(e_Hist, edot_Hist);
+    xlabel('e'); ylabel('e_dot');
+    end
 
 end
 
